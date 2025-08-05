@@ -1,18 +1,38 @@
 {
   "name": "medtracker-be",
   "version": "1.0.0",
-  "main": "index.js",
+  "description": "Backend API for Medicine Tracker app - handles authentication, medicine management, intake logging, and weight tracking",
+  "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "lint": "echo \"No linting configured yet\"",
+    "check-env": "node -e \"require('dotenv').config(); console.log('Environment check:', { SUPABASE_URL: process.env.SUPABASE_URL ? 'Set' : 'Missing', SUPABASE_ANON_KEY: process.env.SUPABASE_ANON_KEY ? 'Set' : 'Missing' })\""
   },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "medicine",
+    "tracker",
+    "health",
+    "nodejs",
+    "express",
+    "supabase",
+    "api",
+    "backend"
+  ],
+  "author": "Medicine Tracker Team",
   "license": "ISC",
-  "description": "",
   "dependencies": {
     "@supabase/supabase-js": "^2.53.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.1",
     "express": "^5.1.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "medicine-tracker"
   }
 }
