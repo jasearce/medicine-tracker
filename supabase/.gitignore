@@ -1,0 +1,13 @@
+# Supabase
+.branches
+.temp
+/functions/.env
+/functions/**/.env
+/logs/
+
+# dotenvx
+.env.keys
+.env.local
+.env.*.local
+
+.DS_Store
