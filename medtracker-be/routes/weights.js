@@ -1,12 +1,12 @@
 /**
- * Weight Tracking Routes
+ * Weight Tracking Routes (Final Version)
  * 
- * Handles all weight tracking and logging functionality including:
- * - Recording weight measurements with timestamps
- * - Retrieving weight history with filtering and sorting
- * - Updating weight entries for corrections
- * - Deleting incorrect weight entries
- * - Weight analytics and trend analysis
+ * Perfectly aligned with database-setup-final.sql schema:
+ * - Uses weight_kg field for consistent storage
+ * - Uses logged_at timestamp field
+ * - Supports optional unit field for flexibility
+ * - Includes body composition tracking (body_fat_percentage, muscle_mass)
+ * - Full validation matching database constraints
  * 
  * All routes require authentication and ensure users can only access their own weight data.
  * 
@@ -18,85 +18,103 @@ const { authenticateToken } = require('../middleware/auth');
 const router = express.Router();
 
 /**
- * Weight log validation helper
- * Validates weight log data according to business rules
+ * Weight log validation helper (Final Version)
+ * Validates weight log data according to final database schema
  * 
  * @param {Object} weightData - Weight log data to validate
  * @returns {Object} - Validation result with errors array
  */
 const validateWeightLog = (weightData) => {
     const errors = [];
-    const { weight, unit, measuredAt, notes } = weightData;
+    const { weightKg, loggedAt, notes, bodyFatPercentage, muscleMass, unit } = weightData;
     
     // Validate required fields
-    if (!weight) {
+    if (!weightKg) {
         errors.push('Weight value is required');
     } else {
-        const weightNum = parseFloat(weight);
+        const weightNum = parseFloat(weightKg);
         if (isNaN(weightNum)) {
             errors.push('Weight must be a valid number');
         } else if (weightNum <= 0) {
             errors.push('Weight must be greater than 0');
         } else if (weightNum > 1000) {
-            errors.push('Weight must be less than 1000');
+            errors.push('Weight must be less than 1000 kg');
         }
-    }
-    
-    // Validate unit
-    const validUnits = ['kg', 'lbs', 'pounds'];
-    if (!unit || !validUnits.includes(unit.toLowerCase())) {
-        errors.push('Unit must be one of: kg, lbs, pounds');
     }
     
     // Validate timestamp
-    if (measuredAt) {
-        const measureDate = new Date(measuredAt);
-        if (isNaN(measureDate.getTime())) {
-            errors.push('Invalid measurement timestamp format');
-        } else if (measureDate > new Date()) {
+    if (loggedAt) {
+        const logDate = new Date(loggedAt);
+        if (isNaN(logDate.getTime())) {
+            errors.push('Invalid logged timestamp format');
+        } else if (logDate > new Date()) {
             errors.push('Cannot log weight for future dates');
-        } else if (measureDate < new Date('1900-01-01')) {
-            errors.push('Measurement date is too far in the past');
+        } else if (logDate < new Date('1900-01-01')) {
+            errors.push('Logged date is too far in the past');
         }
     }
     
-    // Validate optional fields
+    // Validate optional fields according to database constraints
     if (notes && notes.length > 500) {
         errors.push('Notes must be less than 500 characters');
+    }
+    
+    if (bodyFatPercentage !== undefined && bodyFatPercentage !== null) {
+        const bfp = parseFloat(bodyFatPercentage);
+        if (isNaN(bfp) || bfp < 0 || bfp > 100) {
+            errors.push('Body fat percentage must be between 0 and 100');
+        }
+    }
+    
+    if (muscleMass !== undefined && muscleMass !== null) {
+        const mm = parseFloat(muscleMass);
+        if (isNaN(mm) || mm < 0) {
+            errors.push('Muscle mass must be a positive number');
+        }
+    }
+    
+    if (unit && !['kg', 'lbs', 'pounds'].includes(unit.toLowerCase())) {
+        errors.push('Unit must be one of: kg, lbs, pounds');
     }
     
     return { isValid: errors.length === 0, errors };
 };
 
 /**
- * Convert weight between units
+ * Convert weight between kg and other units for API responses
+ * 
+ * @param {number} weightKg - Weight value in kg
+ * @param {string} targetUnit - Target unit (kg, lbs, pounds)
+ * @returns {number} - Converted weight value
+ */
+const convertFromKg = (weightKg, targetUnit) => {
+    const normalizedUnit = targetUnit.toLowerCase();
+    
+    if (normalizedUnit === 'kg') {
+        return weightKg;
+    } else if (normalizedUnit === 'lbs' || normalizedUnit === 'pounds') {
+        return weightKg * 2.20462; // 1 kg = 2.20462 lbs
+    } else {
+        return weightKg; // Unknown unit, return kg
+    }
+};
+
+/**
+ * Convert weight from other units to kg for storage
  * 
  * @param {number} weight - Weight value to convert
  * @param {string} fromUnit - Source unit (kg, lbs, pounds)
- * @param {string} toUnit - Target unit (kg, lbs, pounds)
- * @returns {number} - Converted weight value
+ * @returns {number} - Weight value in kg
  */
-const convertWeight = (weight, fromUnit, toUnit) => {
-    const normalizedFromUnit = fromUnit.toLowerCase();
-    const normalizedToUnit = toUnit.toLowerCase();
+const convertToKg = (weight, fromUnit) => {
+    const normalizedUnit = fromUnit.toLowerCase();
     
-    // Convert to kg first
-    let weightInKg;
-    if (normalizedFromUnit === 'kg') {
-        weightInKg = weight;
-    } else if (normalizedFromUnit === 'lbs' || normalizedFromUnit === 'pounds') {
-        weightInKg = weight * 0.453592; // 1 lb = 0.453592 kg
+    if (normalizedUnit === 'kg') {
+        return weight;
+    } else if (normalizedUnit === 'lbs' || normalizedUnit === 'pounds') {
+        return weight * 0.453592; // 1 lb = 0.453592 kg
     } else {
-        return weight; // Unknown unit, return as is
-    }
-    
-    // Convert from kg to target unit
-    if (normalizedToUnit === 'kg') {
-        return weightInKg;
-    } else if (normalizedToUnit === 'lbs' || normalizedToUnit === 'pounds') {
-        return weightInKg * 2.20462; // 1 kg = 2.20462 lbs
-    } else {
-        return weightInKg; // Unknown target unit, return kg
+        return weight; // Unknown unit, assume kg
     }
 };
 
@@ -109,7 +127,7 @@ const convertWeight = (weight, fromUnit, toUnit) => {
  * - startDate: string (optional) - Filter logs from this date (YYYY-MM-DD)
  * - endDate: string (optional) - Filter logs until this date (YYYY-MM-DD)
  * - unit: string (optional) - Convert weights to this unit (kg, lbs, pounds)
- * - sortBy: string (optional) - Sort by field (measured_at, weight, created_at)
+ * - sortBy: string (optional) - Sort by field (logged_at, weight_kg, created_at)
  * - sortOrder: string (optional) - Sort order (asc, desc)
  * - page: number (optional) - Page number for pagination
  * - limit: number (optional) - Items per page (max 100)
@@ -128,8 +146,8 @@ router.get('/', authenticateToken, async (req, res) => {
         const {
             startDate,
             endDate,
-            unit,
-            sortBy = 'measured_at',
+            unit = 'kg',
+            sortBy = 'logged_at',
             sortOrder = 'desc',
             page = 1,
             limit = 50
@@ -150,7 +168,7 @@ router.get('/', authenticateToken, async (req, res) => {
         if (startDate) {
             const start = new Date(startDate);
             if (!isNaN(start.getTime())) {
-                query = query.gte('measured_at', start.toISOString());
+                query = query.gte('logged_at', start.toISOString());
             }
         }
         
@@ -159,13 +177,13 @@ router.get('/', authenticateToken, async (req, res) => {
             if (!isNaN(end.getTime())) {
                 // Set to end of day
                 end.setHours(23, 59, 59, 999);
-                query = query.lte('measured_at', end.toISOString());
+                query = query.lte('logged_at', end.toISOString());
             }
         }
         
         // Apply sorting
-        const validSortFields = ['measured_at', 'weight', 'created_at'];
-        const sortField = validSortFields.includes(sortBy) ? sortBy : 'measured_at';
+        const validSortFields = ['logged_at', 'weight_kg', 'created_at'];
+        const sortField = validSortFields.includes(sortBy) ? sortBy : 'logged_at';
         const order = sortOrder.toLowerCase() === 'asc' ? 'asc' : 'desc';
         
         query = query.order(sortField, { ascending: order === 'asc' });
@@ -183,15 +201,20 @@ router.get('/', authenticateToken, async (req, res) => {
             });
         }
         
-        // Convert units if requested
+        // Convert units if requested and add display weight field
         let processedWeights = weights || [];
-        if (unit && processedWeights.length > 0) {
+        if (unit && unit.toLowerCase() !== 'kg' && processedWeights.length > 0) {
             processedWeights = processedWeights.map(weight => ({
                 ...weight,
-                weight: convertWeight(weight.weight, weight.unit, unit),
-                original_weight: weight.weight,
-                original_unit: weight.unit,
+                weight: convertFromKg(weight.weight_kg, unit),
+                weight_kg: weight.weight_kg, // Keep original
                 converted_unit: unit.toLowerCase()
+            }));
+        } else {
+            // Add weight field that matches the weight_kg for consistency
+            processedWeights = processedWeights.map(weight => ({
+                ...weight,
+                weight: weight.weight_kg
             }));
         }
         
@@ -204,14 +227,14 @@ router.get('/', authenticateToken, async (req, res) => {
         if (startDate) {
             const start = new Date(startDate);
             if (!isNaN(start.getTime())) {
-                countQuery = countQuery.gte('measured_at', start.toISOString());
+                countQuery = countQuery.gte('logged_at', start.toISOString());
             }
         }
         if (endDate) {
             const end = new Date(endDate);
             if (!isNaN(end.getTime())) {
                 end.setHours(23, 59, 59, 999);
-                countQuery = countQuery.lte('measured_at', end.toISOString());
+                countQuery = countQuery.lte('logged_at', end.toISOString());
             }
         }
         
@@ -232,7 +255,7 @@ router.get('/', authenticateToken, async (req, res) => {
                 hasNext: (pageNum * limitNum) < (totalCount || 0),
                 hasPrev: pageNum > 1
             },
-            ...(unit && { converted_to_unit: unit.toLowerCase() })
+            ...(unit && unit.toLowerCase() !== 'kg' && { converted_to_unit: unit.toLowerCase() })
         });
         
     } catch (error) {
@@ -284,6 +307,9 @@ router.get('/:id', authenticateToken, async (req, res) => {
             });
         }
         
+        // Add weight field for consistency
+        weight.weight = weight.weight_kg;
+        
         res.status(200).json({
             message: 'Weight log retrieved successfully',
             weight
@@ -305,8 +331,8 @@ router.get('/:id', authenticateToken, async (req, res) => {
  * 
  * Request body:
  * - weight: number (required) - Weight value
- * - unit: string (required) - Weight unit (kg, lbs, pounds)
- * - measuredAt: string (optional) - ISO timestamp when weight was measured (defaults to now)
+ * - unit: string (optional) - Weight unit (kg, lbs, pounds) - defaults to kg
+ * - loggedAt: string (optional) - ISO timestamp when weight was measured (defaults to now)
  * - notes: string (optional) - Additional notes about this measurement
  * - bodyFatPercentage: number (optional) - Body fat percentage if available
  * - muscleMass: number (optional) - Muscle mass if available
@@ -324,22 +350,27 @@ router.post('/', authenticateToken, async (req, res) => {
         
         const { 
             weight, 
-            unit, 
-            measuredAt, 
+            unit = 'kg', 
+            loggedAt, 
             notes, 
             bodyFatPercentage, 
             muscleMass 
         } = req.body;
         
-        // Use current time if no measurement time provided
-        const measurementTime = measuredAt || new Date().toISOString();
+        // Use current time if no timestamp provided
+        const logTime = loggedAt || new Date().toISOString();
+        
+        // Convert weight to kg for storage
+        const weightKg = convertToKg(weight, unit);
         
         // Validate input data
         const validation = validateWeightLog({ 
-            weight, 
-            unit, 
-            measuredAt: measurementTime, 
-            notes 
+            weightKg, 
+            loggedAt: logTime, 
+            notes,
+            bodyFatPercentage,
+            muscleMass,
+            unit
         });
         
         if (!validation.isValid) {
@@ -350,58 +381,37 @@ router.post('/', authenticateToken, async (req, res) => {
             });
         }
         
-        // Validate optional body composition values
-        if (bodyFatPercentage !== undefined) {
-            const bfp = parseFloat(bodyFatPercentage);
-            if (isNaN(bfp) || bfp < 0 || bfp > 100) {
-                return res.status(400).json({
-                    error: 'Validation Error',
-                    message: 'Body fat percentage must be between 0 and 100'
-                });
-            }
-        }
-        
-        if (muscleMass !== undefined) {
-            const mm = parseFloat(muscleMass);
-            if (isNaN(mm) || mm < 0) {
-                return res.status(400).json({
-                    error: 'Validation Error',
-                    message: 'Muscle mass must be a positive number'
-                });
-            }
-        }
-        
-        // Check for duplicate entries (same day)
-        const measureDate = new Date(measurementTime);
-        const dayStart = new Date(measureDate);
+        // Check for duplicate entries (same day) - optional warning
+        const logDate = new Date(logTime);
+        const dayStart = new Date(logDate);
         dayStart.setHours(0, 0, 0, 0);
-        const dayEnd = new Date(measureDate);
+        const dayEnd = new Date(logDate);
         dayEnd.setHours(23, 59, 59, 999);
         
         const { data: duplicateCheck, error: duplicateError } = await supabase
             .from('weight_logs')
-            .select('id, measured_at')
+            .select('id, logged_at')
             .eq('user_id', userId)
-            .gte('measured_at', dayStart.toISOString())
-            .lte('measured_at', dayEnd.toISOString());
+            .gte('logged_at', dayStart.toISOString())
+            .lte('logged_at', dayEnd.toISOString());
         
         if (duplicateError) {
             console.error('Error checking for duplicates:', duplicateError);
         } else if (duplicateCheck && duplicateCheck.length > 0) {
             // Warning but not blocking - user might want multiple measurements per day
-            console.log(`User ${userId} already has ${duplicateCheck.length} weight log(s) for ${measureDate.toDateString()}`);
+            console.log(`User ${userId} already has ${duplicateCheck.length} weight log(s) for ${logDate.toDateString()}`);
         }
         
-        // Prepare weight log data
+        // Prepare weight log data for final schema
         const weightLogData = {
             user_id: userId,
-            weight: parseFloat(weight),
-            unit: unit.toLowerCase(),
-            measured_at: measurementTime,
+            weight_kg: parseFloat(weightKg),
+            logged_at: logTime,
             notes: notes?.trim() || null,
             body_fat_percentage: bodyFatPercentage ? parseFloat(bodyFatPercentage) : null,
             muscle_mass: muscleMass ? parseFloat(muscleMass) : null,
-            created_at: new Date().toISOString()
+            unit: unit.toLowerCase()
+            // created_at and updated_at are handled by database defaults
         };
         
         // Insert weight log into database
@@ -413,15 +423,33 @@ router.post('/', authenticateToken, async (req, res) => {
         
         if (error) {
             console.error('Error creating weight log:', error);
+            
+            // Handle constraint violations
+            if (error.code === '23514') { // Check constraint violation
+                return res.status(400).json({
+                    error: 'Constraint Violation',
+                    message: 'The weight log data violates database constraints.',
+                    details: error.message
+                });
+            }
+            
             return res.status(500).json({
                 error: 'Database Error',
                 message: 'Failed to create weight log'
             });
         }
         
+        // Add weight field for consistency in response
+        weightLog.weight = weightLog.weight_kg;
+        
         res.status(201).json({
             message: 'Weight log created successfully',
-            weight: weightLog
+            weight: weightLog,
+            originalInput: {
+                weight: weight,
+                unit: unit,
+                convertedToKg: weightKg
+            }
         });
         
     } catch (error) {
@@ -441,8 +469,8 @@ router.post('/', authenticateToken, async (req, res) => {
  * 
  * Request body: (all fields optional)
  * - weight: number - Updated weight value
- * - unit: string - Updated weight unit
- * - measuredAt: string - Updated measurement timestamp
+ * - unit: string - Unit for the weight value (for conversion)
+ * - loggedAt: string - Updated timestamp
  * - notes: string - Updated notes
  * - bodyFatPercentage: number - Updated body fat percentage
  * - muscleMass: number - Updated muscle mass
@@ -462,17 +490,17 @@ router.put('/:id', authenticateToken, async (req, res) => {
         
         const { 
             weight, 
-            unit, 
-            measuredAt, 
+            unit = 'kg',
+            loggedAt, 
             notes, 
             bodyFatPercentage, 
             muscleMass 
         } = req.body;
         
         // Validate if any data is provided to update
-        const hasUpdateData = weight !== undefined || unit !== undefined || 
-                             measuredAt !== undefined || notes !== undefined ||
-                             bodyFatPercentage !== undefined || muscleMass !== undefined;
+        const hasUpdateData = weight !== undefined || loggedAt !== undefined || 
+                             notes !== undefined || bodyFatPercentage !== undefined || 
+                             muscleMass !== undefined;
         
         if (!hasUpdateData) {
             return res.status(400).json({
@@ -481,13 +509,21 @@ router.put('/:id', authenticateToken, async (req, res) => {
             });
         }
         
+        // Convert weight to kg if provided
+        let weightKg;
+        if (weight !== undefined) {
+            weightKg = convertToKg(weight, unit);
+        }
+        
         // Validate updated data if core fields are provided
-        if (weight !== undefined || unit !== undefined || measuredAt !== undefined) {
+        if (weightKg !== undefined || loggedAt !== undefined) {
             const validation = validateWeightLog({
-                weight: weight || 70, // Provide placeholder for validation
-                unit: unit || 'kg',
-                measuredAt: measuredAt || new Date().toISOString(),
-                notes
+                weightKg: weightKg || 70, // Provide placeholder for validation
+                loggedAt: loggedAt || new Date().toISOString(),
+                notes,
+                bodyFatPercentage,
+                muscleMass,
+                unit
             });
             
             if (!validation.isValid) {
@@ -499,35 +535,11 @@ router.put('/:id', authenticateToken, async (req, res) => {
             }
         }
         
-        // Validate optional body composition values
-        if (bodyFatPercentage !== undefined && bodyFatPercentage !== null) {
-            const bfp = parseFloat(bodyFatPercentage);
-            if (isNaN(bfp) || bfp < 0 || bfp > 100) {
-                return res.status(400).json({
-                    error: 'Validation Error',
-                    message: 'Body fat percentage must be between 0 and 100'
-                });
-            }
-        }
-        
-        if (muscleMass !== undefined && muscleMass !== null) {
-            const mm = parseFloat(muscleMass);
-            if (isNaN(mm) || mm < 0) {
-                return res.status(400).json({
-                    error: 'Validation Error',
-                    message: 'Muscle mass must be a positive number'
-                });
-            }
-        }
-        
         // Build update object with only provided fields
-        const updateData = {
-            updated_at: new Date().toISOString()
-        };
+        const updateData = {};
         
-        if (weight !== undefined) updateData.weight = parseFloat(weight);
-        if (unit !== undefined) updateData.unit = unit.toLowerCase();
-        if (measuredAt !== undefined) updateData.measured_at = new Date(measuredAt).toISOString();
+        if (weightKg !== undefined) updateData.weight_kg = parseFloat(weightKg);
+        if (loggedAt !== undefined) updateData.logged_at = new Date(loggedAt).toISOString();
         if (notes !== undefined) updateData.notes = notes?.trim() || null;
         if (bodyFatPercentage !== undefined) {
             updateData.body_fat_percentage = bodyFatPercentage ? parseFloat(bodyFatPercentage) : null;
@@ -535,6 +547,9 @@ router.put('/:id', authenticateToken, async (req, res) => {
         if (muscleMass !== undefined) {
             updateData.muscle_mass = muscleMass ? parseFloat(muscleMass) : null;
         }
+        if (unit !== undefined) updateData.unit = unit.toLowerCase();
+        
+        // updated_at will be automatically set by trigger
         
         // Update weight log in database
         const { data: weightLog, error } = await supabase
@@ -559,6 +574,9 @@ router.put('/:id', authenticateToken, async (req, res) => {
                 message: 'Failed to update weight log'
             });
         }
+        
+        // Add weight field for consistency
+        weightLog.weight = weightLog.weight_kg;
         
         res.status(200).json({
             message: 'Weight log updated successfully',
@@ -679,9 +697,9 @@ router.get('/analytics/trends', authenticateToken, async (req, res) => {
             .from('weight_logs')
             .select('*')
             .eq('user_id', userId)
-            .gte('measured_at', start.toISOString())
-            .lte('measured_at', end.toISOString())
-            .order('measured_at', { ascending: true });
+            .gte('logged_at', start.toISOString())
+            .lte('logged_at', end.toISOString())
+            .order('logged_at', { ascending: true });
         
         if (error) {
             console.error('Error fetching weights for analytics:', error);
@@ -711,9 +729,8 @@ router.get('/analytics/trends', authenticateToken, async (req, res) => {
         // Convert weights to requested unit
         const convertedWeights = weights.map(w => ({
             ...w,
-            weight: convertWeight(w.weight, w.unit, unit),
-            original_weight: w.weight,
-            original_unit: w.unit
+            weight: convertFromKg(w.weight_kg, unit),
+            weight_kg: w.weight_kg // Keep original
         }));
         
         // Calculate analytics
@@ -725,7 +742,8 @@ router.get('/analytics/trends', authenticateToken, async (req, res) => {
         
         // Calculate trend
         let trend = 'stable';
-        if (Math.abs(weightChange) > 0.5) { // Threshold for significant change
+        const changeThreshold = unit.toLowerCase() === 'kg' ? 0.5 : 1.1; // 0.5kg or 1.1lbs
+        if (Math.abs(weightChange) > changeThreshold) {
             trend = weightChange > 0 ? 'increasing' : 'decreasing';
         }
         
@@ -734,7 +752,7 @@ router.get('/analytics/trends', authenticateToken, async (req, res) => {
         const weeklyGroups = {};
         
         convertedWeights.forEach(weight => {
-            const date = new Date(weight.measured_at);
+            const date = new Date(weight.logged_at);
             const weekStart = new Date(date);
             weekStart.setDate(date.getDate() - date.getDay()); // Start of week (Sunday)
             const weekKey = weekStart.toISOString().split('T')[0];
@@ -776,10 +794,11 @@ router.get('/analytics/trends', authenticateToken, async (req, res) => {
             timeline: convertedWeights.map(w => ({
                 id: w.id,
                 weight: parseFloat(w.weight.toFixed(2)),
-                measuredAt: w.measured_at,
+                loggedAt: w.logged_at,
                 notes: w.notes,
                 bodyFatPercentage: w.body_fat_percentage,
-                muscleMass: w.muscle_mass
+                muscleMass: w.muscle_mass,
+                unit: w.unit
             })),
             weeklyAverages
         });

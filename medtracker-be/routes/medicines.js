@@ -1,12 +1,12 @@
 /**
- * Medicine Management Routes
+ * Medicine Management Routes (Final Version)
  * 
- * Handles all medicine-related CRUD operations including:
- * - Creating new medicines with dosage and schedule information
- * - Retrieving user's medicine list with filtering and sorting
- * - Updating medicine details, dosage, and schedule
- * - Deleting medicines from user's collection
- * - Managing medicine schedules (daily/weekly with specific times)
+ * Perfectly aligned with database-setup-final.sql schema:
+ * - Uses 'dose' field (not 'dosage') 
+ * - Uses 'active' field (not 'is_active')
+ * - Supports interval-based scheduling (interval_minutes, interval_days)
+ * - Supports meal-based scheduling (meal_timing array)
+ * - Full validation matching database constraints
  * 
  * All routes require authentication and ensure users can only access their own medicines.
  * 
@@ -18,15 +18,24 @@ const { authenticateToken, requireOwnership } = require('../middleware/auth');
 const router = express.Router();
 
 /**
- * Medicine validation helper
- * Validates medicine data according to business rules
+ * Medicine validation helper (Final Version)
+ * Validates medicine data according to the final database schema
  * 
  * @param {Object} medicineData - Medicine data to validate
  * @returns {Object} - Validation result with errors array
  */
 const validateMedicine = (medicineData) => {
     const errors = [];
-    const { name, dosage, scheduleType, scheduleTimes, instructions } = medicineData;
+    const { 
+        name, 
+        dose,
+        scheduleType, 
+        intervalMinutes, 
+        intervalDays, 
+        mealTiming, 
+        instructions,
+        notes
+    } = medicineData;
     
     // Validate required fields
     if (!name || name.trim().length === 0) {
@@ -37,34 +46,47 @@ const validateMedicine = (medicineData) => {
         errors.push('Medicine name must be less than 100 characters');
     }
     
-    if (!dosage || dosage.trim().length === 0) {
-        errors.push('Dosage information is required');
-    } else if (dosage.trim().length > 50) {
-        errors.push('Dosage must be less than 50 characters');
+    if (!dose || dose.trim().length === 0) {
+        errors.push('Dose information is required');
+    } else if (dose.trim().length > 50) {
+        errors.push('Dose must be less than 50 characters');
     }
     
     // Validate schedule type
-    const validScheduleTypes = ['daily', 'weekly', 'as_needed'];
+    const validScheduleTypes = ['interval', 'meal_based'];
     if (!scheduleType || !validScheduleTypes.includes(scheduleType)) {
-        errors.push('Schedule type must be one of: daily, weekly, as_needed');
+        errors.push('Schedule type must be one of: interval, meal_based');
     }
     
-    // Validate schedule times for daily and weekly schedules
-    if (scheduleType === 'daily' || scheduleType === 'weekly') {
-        if (!scheduleTimes || !Array.isArray(scheduleTimes) || scheduleTimes.length === 0) {
-            errors.push('Schedule times are required for daily and weekly schedules');
+    // Validate interval-based schedule
+    if (scheduleType === 'interval') {
+        if (!intervalMinutes || intervalMinutes <= 0) {
+            errors.push('Interval minutes must be a positive number for interval-based schedules');
+        } else if (intervalMinutes > 43200) { // 30 days in minutes
+            errors.push('Interval minutes cannot exceed 30 days (43200 minutes)');
+        }
+        
+        // interval_days is optional, but if provided should be positive
+        if (intervalDays !== undefined && intervalDays !== null && intervalDays <= 0) {
+            errors.push('Interval days must be a positive number if specified');
+        }
+    }
+    
+    // Validate meal-based schedule
+    if (scheduleType === 'meal_based') {
+        if (!mealTiming || !Array.isArray(mealTiming) || mealTiming.length === 0) {
+            errors.push('Meal timing is required for meal-based schedules');
         } else {
-            // Validate time format (HH:MM)
-            const timeRegex = /^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/;
-            scheduleTimes.forEach((time, index) => {
-                if (!timeRegex.test(time)) {
-                    errors.push(`Invalid time format at position ${index + 1}. Use HH:MM format (24-hour)`);
+            const validMealTimings = ['before_meal', 'after_meal', 'with_meal'];
+            mealTiming.forEach((timing, index) => {
+                if (!validMealTimings.includes(timing)) {
+                    errors.push(`Invalid meal timing at position ${index + 1}. Must be one of: ${validMealTimings.join(', ')}`);
                 }
             });
             
-            // Check for maximum times per day
-            if (scheduleTimes.length > 10) {
-                errors.push('Maximum 10 times per day allowed');
+            // Check for maximum meal timings (database constraint)
+            if (mealTiming.length > 5) {
+                errors.push('Maximum 5 meal timings allowed');
             }
         }
     }
@@ -72,6 +94,10 @@ const validateMedicine = (medicineData) => {
     // Validate optional fields
     if (instructions && instructions.length > 500) {
         errors.push('Instructions must be less than 500 characters');
+    }
+    
+    if (notes && notes.length > 500) {
+        errors.push('Notes must be less than 500 characters');
     }
     
     return { isValid: errors.length === 0, errors };
@@ -84,8 +110,9 @@ const validateMedicine = (medicineData) => {
  * 
  * Query parameters:
  * - search: string (optional) - Search by medicine name
- * - scheduleType: string (optional) - Filter by schedule type
- * - sortBy: string (optional) - Sort by field (name, createdAt, dosage)
+ * - scheduleType: string (optional) - Filter by schedule type (interval, meal_based)
+ * - active: boolean (optional) - Filter by active status
+ * - sortBy: string (optional) - Sort by field (name, created_at, dose)
  * - sortOrder: string (optional) - Sort order (asc, desc)
  * - page: number (optional) - Page number for pagination
  * - limit: number (optional) - Items per page (max 100)
@@ -104,6 +131,7 @@ router.get('/', authenticateToken, async (req, res) => {
         const {
             search,
             scheduleType,
+            active,
             sortBy = 'created_at',
             sortOrder = 'desc',
             page = 1,
@@ -130,8 +158,12 @@ router.get('/', authenticateToken, async (req, res) => {
             query = query.eq('schedule_type', scheduleType);
         }
         
+        if (active !== undefined) {
+            query = query.eq('active', active === 'true');
+        }
+        
         // Apply sorting
-        const validSortFields = ['name', 'created_at', 'dosage', 'schedule_type'];
+        const validSortFields = ['name', 'created_at', 'dose', 'schedule_type'];
         const sortField = validSortFields.includes(sortBy) ? sortBy : 'created_at';
         const order = sortOrder.toLowerCase() === 'asc' ? 'asc' : 'desc';
         
@@ -140,7 +172,7 @@ router.get('/', authenticateToken, async (req, res) => {
         // Apply pagination
         query = query.range(offset, offset + limitNum - 1);
         
-        const { data: medicines, error, count } = await query;
+        const { data: medicines, error } = await query;
         
         if (error) {
             console.error('Error fetching medicines:', error);
@@ -243,9 +275,11 @@ router.get('/:id', authenticateToken, requireOwnership(), async (req, res) => {
  * 
  * Request body:
  * - name: string (required) - Medicine name
- * - dosage: string (required) - Dosage information (e.g., "10mg", "2 tablets")
- * - scheduleType: string (required) - Schedule type: "daily", "weekly", or "as_needed"
- * - scheduleTimes: array (required for daily/weekly) - Array of time strings in HH:MM format
+ * - dose: string (required) - Dose information (e.g., "10mg", "2 tablets")
+ * - scheduleType: string (required) - Schedule type: "interval" or "meal_based"
+ * - intervalMinutes: number (required for interval) - Minutes between doses
+ * - intervalDays: number (optional for interval) - Days between cycles
+ * - mealTiming: array (required for meal_based) - Array of meal timing strings
  * - instructions: string (optional) - Additional instructions
  * - notes: string (optional) - Personal notes about the medicine
  * 
@@ -260,7 +294,16 @@ router.post('/', authenticateToken, async (req, res) => {
         const supabase = req.app.locals.supabase;
         const userId = req.user.id;
         
-        const { name, dosage, scheduleType, scheduleTimes, instructions, notes } = req.body;
+        const { 
+            name, 
+            dose, 
+            scheduleType, 
+            intervalMinutes, 
+            intervalDays, 
+            mealTiming, 
+            instructions, 
+            notes 
+        } = req.body;
         
         // Validate input data
         const validation = validateMedicine(req.body);
@@ -272,18 +315,19 @@ router.post('/', authenticateToken, async (req, res) => {
             });
         }
         
-        // Prepare medicine data
+        // Prepare medicine data according to final schema
         const medicineData = {
             user_id: userId,
             name: name.trim(),
-            dosage: dosage.trim(),
+            dose: dose.trim(),
             schedule_type: scheduleType,
-            schedule_times: scheduleType === 'as_needed' ? [] : scheduleTimes,
+            interval_minutes: scheduleType === 'interval' ? intervalMinutes : null,
+            interval_days: scheduleType === 'interval' && intervalDays ? intervalDays : null,
+            meal_timing: scheduleType === 'meal_based' ? mealTiming : null,
             instructions: instructions?.trim() || null,
             notes: notes?.trim() || null,
-            is_active: true,
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString()
+            active: true
+            // created_at and updated_at are handled by database defaults
         };
         
         // Insert medicine into database
@@ -296,11 +340,12 @@ router.post('/', authenticateToken, async (req, res) => {
         if (error) {
             console.error('Error creating medicine:', error);
             
-            // Handle duplicate name constraint (if exists)
-            if (error.code === '23505' && error.message.includes('name')) {
-                return res.status(409).json({
-                    error: 'Medicine Already Exists',
-                    message: 'A medicine with this name already exists in your collection'
+            // Handle constraint violations
+            if (error.code === '23514') { // Check constraint violation
+                return res.status(400).json({
+                    error: 'Constraint Violation',
+                    message: 'The medicine data violates database constraints. Please check your input.',
+                    details: error.message
                 });
             }
             
@@ -332,12 +377,14 @@ router.post('/', authenticateToken, async (req, res) => {
  * 
  * Request body: (all fields optional)
  * - name: string - Medicine name
- * - dosage: string - Dosage information
+ * - dose: string - Dose information
  * - scheduleType: string - Schedule type
- * - scheduleTimes: array - Schedule times
+ * - intervalMinutes: number - Minutes between doses
+ * - intervalDays: number - Days between cycles
+ * - mealTiming: array - Meal timing array
  * - instructions: string - Additional instructions
  * - notes: string - Personal notes
- * - isActive: boolean - Whether medicine is active
+ * - active: boolean - Whether medicine is active
  * 
  * Response:
  * - 200: Medicine updated successfully
@@ -352,15 +399,26 @@ router.put('/:id', authenticateToken, requireOwnership(), async (req, res) => {
         const supabase = req.app.locals.supabase;
         const { id } = req.params;
         
-        const { name, dosage, scheduleType, scheduleTimes, instructions, notes, isActive } = req.body;
+        const { 
+            name, 
+            dose, 
+            scheduleType, 
+            intervalMinutes, 
+            intervalDays, 
+            mealTiming, 
+            instructions, 
+            notes, 
+            active 
+        } = req.body;
         
         // If updating core medicine data, validate it
-        if (name || dosage || scheduleType || scheduleTimes) {
+        if (name || dose || scheduleType || intervalMinutes || mealTiming) {
             const validation = validateMedicine({
                 name: name || 'placeholder', // Provide placeholder for validation
-                dosage: dosage || 'placeholder',
-                scheduleType: scheduleType || 'daily',
-                scheduleTimes: scheduleTimes || ['08:00']
+                dose: dose || 'placeholder',
+                scheduleType: scheduleType || 'interval',
+                intervalMinutes: intervalMinutes || 60,
+                mealTiming: mealTiming || ['before_meal']
             });
             
             if (!validation.isValid) {
@@ -373,17 +431,19 @@ router.put('/:id', authenticateToken, requireOwnership(), async (req, res) => {
         }
         
         // Build update object with only provided fields
-        const updateData = {
-            updated_at: new Date().toISOString()
-        };
+        const updateData = {};
         
         if (name !== undefined) updateData.name = name.trim();
-        if (dosage !== undefined) updateData.dosage = dosage.trim();
+        if (dose !== undefined) updateData.dose = dose.trim();
         if (scheduleType !== undefined) updateData.schedule_type = scheduleType;
-        if (scheduleTimes !== undefined) updateData.schedule_times = scheduleType === 'as_needed' ? [] : scheduleTimes;
+        if (intervalMinutes !== undefined) updateData.interval_minutes = intervalMinutes;
+        if (intervalDays !== undefined) updateData.interval_days = intervalDays;
+        if (mealTiming !== undefined) updateData.meal_timing = mealTiming;
         if (instructions !== undefined) updateData.instructions = instructions?.trim() || null;
         if (notes !== undefined) updateData.notes = notes?.trim() || null;
-        if (isActive !== undefined) updateData.is_active = Boolean(isActive);
+        if (active !== undefined) updateData.active = Boolean(active);
+        
+        // updated_at will be automatically set by trigger
         
         // Update medicine in database
         const { data: medicine, error } = await supabase
@@ -427,7 +487,7 @@ router.put('/:id', authenticateToken, requireOwnership(), async (req, res) => {
  * DELETE /api/medicines/:id
  * 
  * Delete a medicine from user's collection
- * This will also delete all associated medicine logs
+ * This will also delete all associated medicine logs (CASCADE)
  * Ensures user can only delete their own medicines
  * 
  * Response:
@@ -442,7 +502,7 @@ router.delete('/:id', authenticateToken, requireOwnership(), async (req, res) =>
         const supabase = req.app.locals.supabase;
         const { id } = req.params;
         
-        // Delete medicine (this should cascade delete medicine logs if foreign key is set up properly)
+        // Delete medicine (CASCADE will delete medicine logs automatically)
         const { error } = await supabase
             .from('medicines')
             .delete()
@@ -471,19 +531,18 @@ router.delete('/:id', authenticateToken, requireOwnership(), async (req, res) =>
 });
 
 /**
- * GET /api/medicines/:id/schedule
+ * GET /api/medicines/:id/next-dose
  * 
- * Get today's schedule for a specific medicine
- * Returns when the medicine should be taken today based on its schedule
+ * Calculate when the next dose should be taken based on the medicine's schedule
  * 
  * Response:
- * - 200: Schedule retrieved successfully
+ * - 200: Next dose time calculated successfully
  * - 401: Not authenticated
  * - 403: Access denied
  * - 404: Medicine not found
  * - 500: Server error
  */
-router.get('/:id/schedule', authenticateToken, requireOwnership(), async (req, res) => {
+router.get('/:id/next-dose', authenticateToken, requireOwnership(), async (req, res) => {
     try {
         const supabase = req.app.locals.supabase;
         const { id } = req.params;
@@ -503,55 +562,72 @@ router.get('/:id/schedule', authenticateToken, requireOwnership(), async (req, r
             });
         }
         
-        const today = new Date();
-        const todayStr = today.toISOString().split('T')[0]; // YYYY-MM-DD format
+        // Get the last dose taken
+        const { data: lastLog, error: logError } = await supabase
+            .from('medicine_logs')
+            .select('taken_at')
+            .eq('medicine_id', id)
+            .eq('user_id', req.user.id)
+            .order('taken_at', { ascending: false })
+            .limit(1)
+            .single();
         
-        let schedule = [];
+        if (logError && logError.code !== 'PGRST116') {
+            console.error('Error fetching last dose:', logError);
+        }
         
-        if (medicine.schedule_type === 'daily') {
-            // For daily medicines, return all scheduled times for today
-            schedule = medicine.schedule_times.map(time => ({
-                time: time,
-                scheduled_for: `${todayStr}T${time}:00.000Z`
-            }));
-        } else if (medicine.schedule_type === 'weekly') {
-            // For weekly medicines, check if today matches the scheduled day
-            const dayOfWeek = today.getDay(); // 0 = Sunday, 1 = Monday, etc.
-            
-            // This is a simplified implementation
-            // You might want to store specific days in the database
-            if (medicine.schedule_times && medicine.schedule_times.length > 0) {
-                schedule = medicine.schedule_times.map(time => ({
-                    time: time,
-                    scheduled_for: `${todayStr}T${time}:00.000Z`
-                }));
+        let nextDoseInfo = {};
+        
+        if (medicine.schedule_type === 'interval' && medicine.interval_minutes) {
+            if (lastLog) {
+                // Calculate next dose based on last dose + interval
+                const lastDose = new Date(lastLog.taken_at);
+                const nextDose = new Date(lastDose.getTime() + (medicine.interval_minutes * 60 * 1000));
+                
+                nextDoseInfo = {
+                    type: 'interval',
+                    nextDoseAt: nextDose.toISOString(),
+                    intervalMinutes: medicine.interval_minutes,
+                    intervalDays: medicine.interval_days,
+                    lastDoseAt: lastLog.taken_at,
+                    isOverdue: nextDose < new Date()
+                };
+            } else {
+                // No previous dose, can take now
+                nextDoseInfo = {
+                    type: 'interval',
+                    nextDoseAt: new Date().toISOString(),
+                    intervalMinutes: medicine.interval_minutes,
+                    intervalDays: medicine.interval_days,
+                    lastDoseAt: null,
+                    isOverdue: false
+                };
             }
-        } else if (medicine.schedule_type === 'as_needed') {
-            // As needed medicines have no fixed schedule
-            schedule = [{
-                time: 'as_needed',
-                scheduled_for: null,
-                note: 'Take as needed'
-            }];
+        } else if (medicine.schedule_type === 'meal_based') {
+            nextDoseInfo = {
+                type: 'meal_based',
+                mealTiming: medicine.meal_timing,
+                instructions: 'Take as scheduled with meals',
+                lastDoseAt: lastLog?.taken_at || null
+            };
         }
         
         res.status(200).json({
-            message: 'Medicine schedule retrieved successfully',
+            message: 'Next dose information retrieved successfully',
             medicine: {
                 id: medicine.id,
                 name: medicine.name,
-                dosage: medicine.dosage,
+                dose: medicine.dose,
                 schedule_type: medicine.schedule_type
             },
-            today: todayStr,
-            schedule
+            nextDose: nextDoseInfo
         });
         
     } catch (error) {
-        console.error('Get medicine schedule route error:', error);
+        console.error('Get next dose route error:', error);
         res.status(500).json({
             error: 'Internal Server Error',
-            message: 'An unexpected error occurred while retrieving medicine schedule'
+            message: 'An unexpected error occurred while calculating next dose'
         });
     }
 });

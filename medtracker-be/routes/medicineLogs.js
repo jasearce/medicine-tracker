@@ -1,12 +1,11 @@
 /**
- * Medicine Log Routes
+ * Medicine Log Routes (Final Version)
  * 
- * Handles logging and tracking of medicine intake including:
- * - Recording when medicines are taken with timestamps
- * - Retrieving medicine intake history with filtering
- * - Updating or correcting logged entries
- * - Deleting incorrect log entries
- * - Analytics and adherence tracking
+ * Perfectly aligned with database-setup-final.sql schema:
+ * - Uses complete medicine_logs table with all fields
+ * - Supports dosage_taken and notes fields  
+ * - Automatic user_id population and validation
+ * - Full RLS security implementation
  * 
  * All routes require authentication and ensure users can only access their own medicine logs.
  * 
@@ -18,8 +17,8 @@ const { authenticateToken, requireOwnership } = require('../middleware/auth');
 const router = express.Router();
 
 /**
- * Medicine log validation helper
- * Validates medicine log data according to business rules
+ * Medicine log validation helper (Final Version)
+ * Validates medicine log data according to final database schema
  * 
  * @param {Object} logData - Medicine log data to validate
  * @returns {Object} - Validation result with errors array
@@ -34,9 +33,7 @@ const validateMedicineLog = (logData) => {
     }
     
     // Validate timestamp
-    if (!takenAt) {
-        errors.push('Taken timestamp is required');
-    } else {
+    if (takenAt) {
         const takenDate = new Date(takenAt);
         if (isNaN(takenDate.getTime())) {
             errors.push('Invalid timestamp format');
@@ -47,7 +44,7 @@ const validateMedicineLog = (logData) => {
         }
     }
     
-    // Validate optional fields
+    // Validate optional fields according to database constraints
     if (dosageTaken && dosageTaken.length > 100) {
         errors.push('Dosage taken must be less than 100 characters');
     }
@@ -107,8 +104,11 @@ router.get('/', authenticateToken, async (req, res) => {
                 medicines (
                     id,
                     name,
-                    dosage,
-                    schedule_type
+                    dose,
+                    schedule_type,
+                    interval_minutes,
+                    interval_days,
+                    meal_timing
                 )
             `)
             .eq('user_id', userId);
@@ -228,8 +228,11 @@ router.get('/:id', authenticateToken, async (req, res) => {
                 medicines (
                     id,
                     name,
-                    dosage,
-                    schedule_type
+                    dose,
+                    schedule_type,
+                    interval_minutes,
+                    interval_days,
+                    meal_timing
                 )
             `)
             .eq('id', id)
@@ -272,16 +275,16 @@ router.get('/:id', authenticateToken, async (req, res) => {
  * 
  * Request body:
  * - medicineId: string (required) - ID of the medicine taken
- * - takenAt: string (required) - ISO timestamp when medicine was taken
+ * - takenAt: string (optional) - ISO timestamp when medicine was taken (defaults to now)
  * - dosageTaken: string (optional) - Actual dosage taken (if different from prescribed)
  * - notes: string (optional) - Additional notes about this intake
- * - scheduledTime: string (optional) - Original scheduled time (for adherence tracking)
  * 
  * Response:
  * - 201: Medicine log created successfully
  * - 400: Invalid input data
  * - 401: Not authenticated
  * - 404: Medicine not found
+ * - 409: Duplicate entry detected
  * - 500: Server error
  */
 router.post('/', authenticateToken, async (req, res) => {
@@ -289,10 +292,13 @@ router.post('/', authenticateToken, async (req, res) => {
         const supabase = req.app.locals.supabase;
         const userId = req.user.id;
         
-        const { medicineId, takenAt, dosageTaken, notes, scheduledTime } = req.body;
+        const { medicineId, takenAt, dosageTaken, notes } = req.body;
+        
+        // Use current time if no timestamp provided
+        const logTime = takenAt || new Date().toISOString();
         
         // Validate input data
-        const validation = validateMedicineLog({ medicineId, takenAt, dosageTaken, notes });
+        const validation = validateMedicineLog({ medicineId, takenAt: logTime, dosageTaken, notes });
         if (!validation.isValid) {
             return res.status(400).json({
                 error: 'Validation Error',
@@ -304,7 +310,7 @@ router.post('/', authenticateToken, async (req, res) => {
         // Verify the medicine exists and belongs to the user
         const { data: medicine, error: medicineError } = await supabase
             .from('medicines')
-            .select('id, name, dosage')
+            .select('id, name, dose')
             .eq('id', medicineId)
             .eq('user_id', userId)
             .single();
@@ -316,8 +322,8 @@ router.post('/', authenticateToken, async (req, res) => {
             });
         }
         
-        // Check for duplicate logs (same medicine within 5 minutes)
-        const takenDate = new Date(takenAt);
+        // Check for duplicate logs (same medicine within 5 minutes) - safety check
+        const takenDate = new Date(logTime);
         const fiveMinutesBefore = new Date(takenDate.getTime() - 5 * 60 * 1000);
         const fiveMinutesAfter = new Date(takenDate.getTime() + 5 * 60 * 1000);
         
@@ -334,19 +340,19 @@ router.post('/', authenticateToken, async (req, res) => {
         } else if (duplicateCheck && duplicateCheck.length > 0) {
             return res.status(409).json({
                 error: 'Duplicate Entry',
-                message: 'A similar medicine log already exists within 5 minutes of this time. Please check your entries.'
+                message: 'A similar medicine log already exists within 5 minutes of this time. Please check your entries.',
+                duplicateCount: duplicateCheck.length
             });
         }
         
-        // Prepare medicine log data
+        // Prepare medicine log data for final schema
         const logData = {
             user_id: userId,
             medicine_id: medicineId,
             taken_at: takenDate.toISOString(),
-            dosage_taken: dosageTaken?.trim() || medicine.dosage,
-            notes: notes?.trim() || null,
-            scheduled_time: scheduledTime || null,
-            created_at: new Date().toISOString()
+            dosage_taken: dosageTaken?.trim() || null,
+            notes: notes?.trim() || null
+            // created_at and updated_at are handled by database defaults
         };
         
         // Insert medicine log into database
@@ -358,7 +364,7 @@ router.post('/', authenticateToken, async (req, res) => {
                 medicines (
                     id,
                     name,
-                    dosage,
+                    dose,
                     schedule_type
                 )
             `)
@@ -366,6 +372,16 @@ router.post('/', authenticateToken, async (req, res) => {
         
         if (error) {
             console.error('Error creating medicine log:', error);
+            
+            // Handle constraint violations
+            if (error.code === '23514') { // Check constraint violation
+                return res.status(400).json({
+                    error: 'Constraint Violation',
+                    message: 'The medicine log data violates database constraints.',
+                    details: error.message
+                });
+            }
+            
             return res.status(500).json({
                 error: 'Database Error',
                 message: 'Failed to create medicine log'
@@ -438,9 +454,7 @@ router.put('/:id', authenticateToken, async (req, res) => {
         }
         
         // Build update object with only provided fields
-        const updateData = {
-            updated_at: new Date().toISOString()
-        };
+        const updateData = {};
         
         if (takenAt !== undefined) {
             updateData.taken_at = new Date(takenAt).toISOString();
@@ -451,6 +465,8 @@ router.put('/:id', authenticateToken, async (req, res) => {
         if (notes !== undefined) {
             updateData.notes = notes?.trim() || null;
         }
+        
+        // updated_at will be automatically set by trigger
         
         // Update medicine log in database
         const { data: log, error } = await supabase
@@ -463,7 +479,7 @@ router.put('/:id', authenticateToken, async (req, res) => {
                 medicines (
                     id,
                     name,
-                    dosage,
+                    dose,
                     schedule_type
                 )
             `)
@@ -547,7 +563,7 @@ router.delete('/:id', authenticateToken, async (req, res) => {
 /**
  * GET /api/medicine-logs/analytics/adherence
  * 
- * Get adherence analytics for a specific period
+ * Get adherence analytics for interval-based medicines
  * 
  * Query parameters:
  * - medicineId: string (optional) - Filter by specific medicine
@@ -601,7 +617,9 @@ router.get('/analytics/adherence', authenticateToken, async (req, res) => {
                     id,
                     name,
                     schedule_type,
-                    schedule_times
+                    interval_minutes,
+                    interval_days,
+                    meal_timing
                 )
             `)
             .eq('user_id', userId)
@@ -636,6 +654,7 @@ router.get('/analytics/adherence', authenticateToken, async (req, res) => {
                     medicineId: log.medicine_id,
                     medicineName: log.medicines.name,
                     scheduleType: log.medicines.schedule_type,
+                    intervalMinutes: log.medicines.interval_minutes,
                     totalTaken: 0,
                     daysActive: new Set()
                 };
@@ -650,19 +669,35 @@ router.get('/analytics/adherence', authenticateToken, async (req, res) => {
             dailyStats[dayKey]++;
         });
         
-        // Convert sets to counts and calculate adherence rates
+        // Calculate adherence rates for interval-based medicines
         const analytics = Object.values(medicineStats).map(stat => {
             const daysActive = stat.daysActive.size;
             const totalDays = Math.ceil((end - start) / (24 * 60 * 60 * 1000));
+            
+            let adherenceRate = 0;
+            let expectedDoses = 0;
+            
+            if (stat.scheduleType === 'interval' && stat.intervalMinutes) {
+                // Calculate expected doses based on interval
+                const totalMinutes = (end - start) / (1000 * 60);
+                expectedDoses = Math.floor(totalMinutes / stat.intervalMinutes);
+                adherenceRate = expectedDoses > 0 ? ((stat.totalTaken / expectedDoses) * 100) : 0;
+            } else if (stat.scheduleType === 'meal_based') {
+                // For meal-based, estimate 3 meals per day
+                expectedDoses = totalDays * 3;
+                adherenceRate = expectedDoses > 0 ? ((stat.totalTaken / expectedDoses) * 100) : 0;
+            }
             
             return {
                 medicineId: stat.medicineId,
                 medicineName: stat.medicineName,
                 scheduleType: stat.scheduleType,
+                intervalMinutes: stat.intervalMinutes,
                 totalTaken: stat.totalTaken,
+                expectedDoses: Math.round(expectedDoses),
                 daysActive: daysActive,
                 totalDays: totalDays,
-                adherenceRate: totalDays > 0 ? ((daysActive / totalDays) * 100).toFixed(1) : 0
+                adherenceRate: Math.min(100, adherenceRate).toFixed(1)
             };
         });
         
