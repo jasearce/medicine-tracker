@@ -57,6 +57,10 @@ const { mockSupabaseClient, resetAllMocks } = require('./__mocks__/@supabase/sup
 // Jest will automatically use our mock file in __mocks__/@supabase/supabase-js.js
 jest.mock('@supabase/supabase-js');
 
+// Enable automatic mocking of authentication middleware
+// Jest will automatically use our mock file in __mocks__/middleware/auth.js
+jest.mock('../middleware/auth');
+
 // Global test utilities
 global.testUtils = {
   // Mock user data
@@ -262,7 +266,28 @@ global.testUtils = {
     logged_at: new Date().toISOString(),
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString()
-  })
+  }),
+
+  // Authentication test utilities
+  mockAuthenticated: (user = null) => {
+    const authMock = require('../middleware/auth');
+    authMock.authenticateToken.mockAuthenticated(user || global.testUtils.mockUser);
+  },
+
+  mockUnauthenticated: () => {
+    const authMock = require('../middleware/auth');
+    authMock.authenticateToken.mockUnauthenticated();
+  },
+
+  mockUnauthorized: () => {
+    const authMock = require('../middleware/auth');
+    authMock.authenticateToken.mockUnauthorized();
+  },
+
+  resetAuthMocks: () => {
+    const authMock = require('../middleware/auth');
+    authMock.authenticateToken.mockReset();
+  }
 };
 
 // Expose the mock Supabase client globally for tests
@@ -275,6 +300,9 @@ beforeEach(() => {
   
   // Reset Supabase mocks to clean state
   global.testUtils.resetSupabaseMocks();
+  
+  // Reset auth mocks to clean state
+  global.testUtils.resetAuthMocks();
   
   // Silence console output by default (tests can override)
   global.mockConsole.silenceAll();
