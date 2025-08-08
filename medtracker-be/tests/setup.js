@@ -57,9 +57,73 @@ const { mockSupabaseClient, resetAllMocks } = require('./__mocks__/@supabase/sup
 // Jest will automatically use our mock file in __mocks__/@supabase/supabase-js.js
 jest.mock('@supabase/supabase-js');
 
-// Enable automatic mocking of authentication middleware
-// Jest will automatically use our mock file in __mocks__/middleware/auth.js
-jest.mock('../middleware/auth');
+// Mock authentication middleware directly in setup
+// This approach works better with Jest's module mocking system
+const mockAuthMiddleware = {
+  authenticateToken: jest.fn((req, res, next) => {
+    if (global.authMockState?.shouldAuthenticate) {
+      req.user = global.authMockState?.mockUser || global.testUtils.mockUser;
+      req.token = 'mock-jwt-token';
+      next();
+    } else {
+      return res.status(401).json({
+        error: 'Unauthorized',
+        message: 'Authentication token is required'
+      });
+    }
+  }),
+  
+  optionalAuth: jest.fn((req, res, next) => {
+    if (global.authMockState?.shouldAuthenticate && global.authMockState?.mockUser) {
+      req.user = global.authMockState.mockUser;
+      req.token = 'mock-jwt-token';
+    }
+    next();
+  }),
+  
+  requireRole: jest.fn((role) => (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({
+        error: 'Authentication Required',
+        message: 'You must be logged in to access this resource.'
+      });
+    }
+    
+    if (!global.authMockState?.shouldAuthorize) {
+      return res.status(403).json({
+        error: 'Insufficient Permissions',
+        message: `Access denied. Required role: ${role}`
+      });
+    }
+    
+    next();
+  }),
+  
+  requireOwnership: jest.fn((userIdField = 'user_id') => (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({
+        error: 'Authentication Required',
+        message: 'You must be logged in to access this resource.'
+      });
+    }
+    
+    if (!global.authMockState?.shouldAuthorize) {
+      return res.status(403).json({
+        error: 'Access Denied',
+        message: 'You can only access your own resources.'
+      });
+    }
+    
+    // For POST/PUT/PATCH requests, automatically add user_id to body
+    if (['POST', 'PUT', 'PATCH'].includes(req.method) && req.body) {
+      req.body[userIdField] = req.user.id;
+    }
+    
+    next();
+  })
+};
+
+jest.doMock('../middleware/auth', () => mockAuthMiddleware);
 
 // Global test utilities
 global.testUtils = {
@@ -270,28 +334,56 @@ global.testUtils = {
 
   // Authentication test utilities
   mockAuthenticated: (user = null) => {
-    const authMock = require('../middleware/auth');
-    authMock.authenticateToken.mockAuthenticated(user || global.testUtils.mockUser);
+    global.authMockState = {
+      shouldAuthenticate: true,
+      shouldAuthorize: true,
+      mockUser: user || global.testUtils.mockUser
+    };
   },
 
   mockUnauthenticated: () => {
-    const authMock = require('../middleware/auth');
-    authMock.authenticateToken.mockUnauthenticated();
+    global.authMockState = {
+      shouldAuthenticate: false,
+      shouldAuthorize: false,
+      mockUser: null
+    };
   },
 
   mockUnauthorized: () => {
-    const authMock = require('../middleware/auth');
-    authMock.authenticateToken.mockUnauthorized();
+    global.authMockState = {
+      shouldAuthenticate: true,
+      shouldAuthorize: false,
+      mockUser: global.testUtils.mockUser
+    };
   },
 
   resetAuthMocks: () => {
+    global.authMockState = {
+      shouldAuthenticate: true,
+      shouldAuthorize: true,
+      mockUser: null
+    };
+    
+    // Clear mock call history
     const authMock = require('../middleware/auth');
-    authMock.authenticateToken.mockReset();
+    if (authMock.authenticateToken?.mockClear) {
+      authMock.authenticateToken.mockClear();
+      authMock.optionalAuth.mockClear();
+      authMock.requireRole.mockClear();
+      authMock.requireOwnership.mockClear();
+    }
   }
 };
 
 // Expose the mock Supabase client globally for tests
 global.mockSupabaseClient = mockSupabaseClient;
+
+// Initialize auth mock state
+global.authMockState = {
+  shouldAuthenticate: true,
+  shouldAuthorize: true,
+  mockUser: null
+};
 
 // Setup and teardown hooks
 beforeEach(() => {
