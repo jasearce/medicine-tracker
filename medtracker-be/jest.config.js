@@ -10,7 +10,7 @@ module.exports = {
   testEnvironment: 'node',
   
   // Setup files to run before tests
-  setupFilesAfterEnv: ['<rootDir>/tests/setup-improved.js'],
+  setupFilesAfterEnv: ['<rootDir>/tests/setup.js'],
   
   // Test file patterns
   testMatch: [
